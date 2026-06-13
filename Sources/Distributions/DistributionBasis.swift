@@ -83,10 +83,10 @@ extension DistributionBasis {
                 repeating: Float.random(in: 0 ..< 1, using: &random.generator)
             )
             var carry: Int32 = 0
-            // Uninterrupted SIMD Hot Loop
+            // uninterrupted simd hot loop
             for c: Int in 0 ..< chunks {
                 let i: Int = c * 4
-                let weightCDF = SIMD4<Float>(
+                let weightCDF: SIMD4<Float> = .init(
                     self.weightCDF[i],
                     self.weightCDF[i + 1],
                     self.weightCDF[i + 2],
