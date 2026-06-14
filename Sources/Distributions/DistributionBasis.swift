@@ -76,46 +76,75 @@ extension DistributionBasis {
         using random: inout PseudoRandom,
         yield: (Channel, Target, Int32) -> ()
     ) {
-        let chunks: Int = self.weightCDF.count / 4
+        let chunks: Int = self.chunks
         for source: Source in sources {
-            let N: SIMD4<Float> = .init(repeating: Float.init(count(source)))
-            let u: SIMD4<Float> = .init(
-                repeating: Float.random(in: 0 ..< 1, using: &random.generator)
+            self.distribute(
+                count: count(source),
+                chunks: chunks,
+                using: &random,
+                yield: yield
             )
-            var carry: Int32 = 0
-            // uninterrupted simd hot loop
-            for c: Int in 0 ..< chunks {
-                let i: Int = c * 4
-                let weightCDF: SIMD4<Float> = .init(
-                    self.weightCDF[i],
-                    self.weightCDF[i + 1],
-                    self.weightCDF[i + 2],
-                    self.weightCDF[i + 3]
-                )
+        }
+    }
 
-                let n: SIMD4<Int32> = .init((N * weightCDF) + u)
-                let m: SIMD4<Int32> = .init(carry, n[0], n[1], n[2])
+    @inlinable public func distribute(
+        count: Int64,
+        using random: inout PseudoRandom,
+        yield: (Channel, Target, Int32) -> ()
+    ) {
+        self.distribute(
+            count: count,
+            chunks: self.chunks,
+            using: &random,
+            yield: yield
+        )
+    }
+}
+extension DistributionBasis {
+    @inlinable var chunks: Int { self.weightCDF.count / 4 }
+    @inlinable func distribute(
+        count: Int64,
+        chunks: Int,
+        using random: inout PseudoRandom,
+        yield: (Channel, Target, Int32) -> ()
+    ) {
+        let N: SIMD4<Float> = .init(repeating: Float.init(count))
+        let u: SIMD4<Float> = .init(
+            repeating: Float.random(in: 0 ..< 1, using: &random.generator)
+        )
+        var carry: Int32 = 0
+        // uninterrupted simd hot loop
+        for c: Int in 0 ..< chunks {
+            let i: Int = c * 4
+            let weightCDF: SIMD4<Float> = .init(
+                self.weightCDF[i],
+                self.weightCDF[i + 1],
+                self.weightCDF[i + 2],
+                self.weightCDF[i + 3]
+            )
 
-                carry = n[3]
+            let n: SIMD4<Int32> = .init((N * weightCDF) + u)
+            let m: SIMD4<Int32> = .init(carry, n[0], n[1], n[2])
 
-                let k: SIMD4<Int32> = n &- m
+            carry = n[3]
 
-                if  k.x > 0 {
-                    let (channel, target, _): (Channel, Target, _) = self.targets[i]
-                    yield(channel, target, k.x)
-                }
-                if  k.y > 0 {
-                    let (channel, target, _): (Channel, Target, _) = self.targets[i + 1]
-                    yield(channel, target, k.y)
-                }
-                if  k.z > 0 {
-                    let (channel, target, _): (Channel, Target, _) = self.targets[i + 2]
-                    yield(channel, target, k.z)
-                }
-                if  k.w > 0 {
-                    let (channel, target, _): (Channel, Target, _) = self.targets[i + 3]
-                    yield(channel, target, k.w)
-                }
+            let k: SIMD4<Int32> = n &- m
+
+            if  k.x > 0 {
+                let (channel, target, _): (Channel, Target, _) = self.targets[i]
+                yield(channel, target, k.x)
+            }
+            if  k.y > 0 {
+                let (channel, target, _): (Channel, Target, _) = self.targets[i + 1]
+                yield(channel, target, k.y)
+            }
+            if  k.z > 0 {
+                let (channel, target, _): (Channel, Target, _) = self.targets[i + 2]
+                yield(channel, target, k.z)
+            }
+            if  k.w > 0 {
+                let (channel, target, _): (Channel, Target, _) = self.targets[i + 3]
+                yield(channel, target, k.w)
             }
         }
     }
