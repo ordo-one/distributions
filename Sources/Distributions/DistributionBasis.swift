@@ -2,50 +2,122 @@ import Assert
 import Random
 
 /// Pre-processed, sorted, and compacted distribution targets.
-@frozen public struct DistributionBasis<Channel, Target> where Channel: DistributionChannel {
+@frozen public struct DistributionBasis<Target> {
     @usableFromInline let weightCDF: [Float]
-    @usableFromInline let targets: [(channel: Channel, target: Target, weight: Float)]
+    @usableFromInline let targets: [(target: Target, weight: Float)]
 
-    @inlinable init(
-        weightCDF: [Float],
-        targets: [(channel: Channel, target: Target, weight: Float)]
-    ) {
+    @inlinable init(weightCDF: [Float], targets: [(target: Target, weight: Float)]) {
         self.weightCDF = weightCDF
         self.targets = targets
     }
 }
-extension DistributionBasis {
+extension DistributionBasis: Sendable where Target: Sendable {}
+extension DistributionBasis where Target: DistributionTarget {
+    /// Create a distribution basis from weighted targets which belong to normalization classes.
+    ///
+    /// -   Parameter targets:
+    ///     The list of weighted targets, each of which is tagged with a
+    ///     ``DistributionTarget/channel`` indicating its normalization class.
+    ///     By default, the array provided will be reused for internal computations.
+    ///
+    /// -   Parameter rescale:
+    ///     A closure that returns the total class weight given a channel identifier. All
+    ///     targets included in this channel will have their weights rescaled such that they
+    ///     sum to the value returned by the closure.
+    ///
+    /// -   Returns:
+    ///     An instance of ``DistributionBasis``, or nil if `targets` contains no nonzero
+    ///     weights.
+    ///
+    /// If all targets belong to a single normalization class, ``create(from:)`` may be called
+    /// instead, which avoids the need for a ``DistributionTarget``-witnessing type, and also
+    /// saves some intermediate calculations.
     @inlinable public static func create(
-        from targets: [(channel: Channel, target: Target, weight: Float)],
-        rescale: (Channel) -> Float
+        from targets: consuming [(target: Target, weight: Float)],
+        rescale: (Target.Channel) -> Float
     ) -> Self? {
         // filter zeros and sort ascending (fixes sparse arrays & float precision)
-        var targets: [(channel: Channel, target: Target, weight: Float)] = targets.filter {
-            $0.weight > 0
-        }
+        targets.removeAll { $0.weight <= 0 }
 
-        targets.sort { $0.weight < $1.weight }
-
-        guard
-        let last: Int = targets.indices.last else {
+        if  targets.isEmpty {
             return nil
+        } else {
+            targets.sort { $0.weight < $1.weight }
+            return .create(ordered: &targets, rescale: rescale)
+        }
+    }
+
+    @inline(always) @inlinable static func create(
+        ordered targets: inout [(target: Target, weight: Float)],
+        rescale: (Target.Channel) -> Float
+    ) -> Self {
+        var totalsUnnormalized: Target.ChannelMap = .zero
+        for (target, weight): (Target, Float) in targets {
+            totalsUnnormalized[target.channel] += weight
         }
 
-        var totalsUnnormalized: Channel.InlineMap = .zero
-        for (channel, _, weight): (Channel, _, Float) in targets {
-            totalsUnnormalized[channel] += weight
-        }
-
-        let totals: Channel.InlineMap = totalsUnnormalized.mapKeys { rescale($0) }
-        let scales: Channel.InlineMap = totalsUnnormalized.mapKeyedValues { rescale($0) / $1 }
+        let totals: Target.ChannelMap = totalsUnnormalized.mapKeys { rescale($0) }
+        let scales: Target.ChannelMap = totalsUnnormalized.mapKeyedValues { rescale($0) / $1 }
         for i: Int in targets.indices {
             {
-                $0.weight *= scales[$0.channel]
+                $0.weight *= scales[$0.target.channel]
                 #assert($0.weight >= 0, "target weight must not be negative!!!")
             } (&targets[i])
         }
 
         let total: Float = totals.sum
+        return .create(ordered: targets) { $0 / total }
+    }
+}
+extension DistributionBasis {
+    /// Create a distribution basis from weighted targets which are all assumed to be part of a
+    /// single normalization class.
+    ///
+    /// -   Parameter targets:
+    ///     The list of weighted targets.
+    ///     By default, the array provided will be reused for internal computations.
+    ///
+    /// -   Returns:
+    ///     An instance of ``DistributionBasis``, or nil if `targets` contains no nonzero
+    ///     weights.
+    @inlinable public static func create(
+        from targets: consuming [(target: Target, weight: Float)],
+    ) -> Self? {
+        targets.removeAll { $0.weight <= 0 }
+
+        if  targets.isEmpty {
+            return nil
+        } else {
+            targets.sort { $0.weight < $1.weight }
+            return .create(ordered: &targets)
+        }
+
+    }
+
+    @inline(always) @inlinable static func create(
+        ordered targets: inout [(target: Target, weight: Float)],
+    ) -> Self {
+        var total: Float = .zero
+        for (_, weight): (Target, Float) in targets {
+            total += weight
+        }
+
+        let scale: Float = 1 / total
+        for i: Int in targets.indices {
+            {
+                $0.weight *= scale
+                #assert($0.weight >= 0, "target weight must not be negative!!!")
+            } (&targets[i])
+        }
+
+        return .create(ordered: targets) { $0 }
+    }
+
+    @inline(always) @inlinable static func create(
+        ordered targets: [(target: Target, weight: Float)],
+        normalize: (_ weight: Float) -> Float
+    ) -> Self {
+        let last: Int = targets.index(before: targets.endIndex)
         let count: Int = targets.count
         let remainder: Int = count & 3
         let countPadded: Int = remainder == 0 ? count : count + (4 - remainder)
@@ -55,7 +127,7 @@ extension DistributionBasis {
 
         var sum: Float = 0
         for i: Int in targets.startIndex ..< last {
-            sum = min(1, sum + targets[i].weight / total)
+            sum = min(1, sum + normalize(targets[i].weight))
             weightCDF.append(sum)
         }
         // mathematically lock the tail and pad for SIMD
@@ -69,16 +141,17 @@ extension DistributionBasis {
 }
 
 extension DistributionBasis {
-    /// Distributes counts and accumulates them into a pre-existing global buffer.
-    @inlinable public func distribute<Source>(
+    /// Distributes counts and passes them to the closure `yield`.
+    /// The closure will only be called for bins with count greater than zero.
+    @inlinable public func distribute<Source, E>(
         sources: [Source],
         count: (Source) -> Int64,
         using random: inout PseudoRandom,
-        yield: (Channel, Target, Int32) -> ()
-    ) {
+        yield: (Target, Int32) throws(E) -> ()
+    ) throws(E) {
         let chunks: Int = self.chunks
         for source: Source in sources {
-            self.distribute(
+            try self.distribute(
                 count: count(source),
                 chunks: chunks,
                 using: &random,
@@ -87,12 +160,14 @@ extension DistributionBasis {
         }
     }
 
-    @inlinable public func distribute(
+    /// Distributes counts and passes them to the closure `yield`.
+    /// The closure will only be called for bins with count greater than zero.
+    @inlinable public func distribute<E>(
         count: Int64,
         using random: inout PseudoRandom,
-        yield: (Channel, Target, Int32) -> ()
-    ) {
-        self.distribute(
+        yield: (Target, Int32) throws(E) -> ()
+    ) throws(E) {
+        try self.distribute(
             count: count,
             chunks: self.chunks,
             using: &random,
@@ -102,12 +177,12 @@ extension DistributionBasis {
 }
 extension DistributionBasis {
     @inlinable var chunks: Int { self.weightCDF.count / 4 }
-    @inlinable func distribute(
+    @inlinable func distribute<E>(
         count: Int64,
         chunks: Int,
         using random: inout PseudoRandom,
-        yield: (Channel, Target, Int32) -> ()
-    ) {
+        yield: (Target, Int32) throws(E) -> ()
+    ) throws(E) {
         let N: SIMD4<Float> = .init(repeating: Float.init(count))
         let u: SIMD4<Float> = .init(
             repeating: Float.random(in: 0 ..< 1, using: &random.generator)
@@ -131,20 +206,16 @@ extension DistributionBasis {
             let k: SIMD4<Int32> = n &- m
 
             if  k.x > 0 {
-                let (channel, target, _): (Channel, Target, _) = self.targets[i]
-                yield(channel, target, k.x)
+                try yield(self.targets[i].target, k.x)
             }
             if  k.y > 0 {
-                let (channel, target, _): (Channel, Target, _) = self.targets[i + 1]
-                yield(channel, target, k.y)
+                try yield(self.targets[i + 1].target, k.y)
             }
             if  k.z > 0 {
-                let (channel, target, _): (Channel, Target, _) = self.targets[i + 2]
-                yield(channel, target, k.z)
+                try yield(self.targets[i + 2].target, k.z)
             }
             if  k.w > 0 {
-                let (channel, target, _): (Channel, Target, _) = self.targets[i + 3]
-                yield(channel, target, k.w)
+                try yield(self.targets[i + 3].target, k.w)
             }
         }
     }
