@@ -11,6 +11,7 @@ import Random
         self.targets = targets
     }
 }
+extension DistributionBasis: Sendable where Target: Sendable {}
 extension DistributionBasis where Target: DistributionTarget {
     /// Create a distribution basis from weighted targets which belong to normalization classes.
     ///
@@ -140,16 +141,17 @@ extension DistributionBasis {
 }
 
 extension DistributionBasis {
-    /// Distributes counts and accumulates them into a pre-existing global buffer.
-    @inlinable public func distribute<Source>(
+    /// Distributes counts and passes them to the closure `yield`.
+    /// The closure will only be called for bins with count greater than zero.
+    @inlinable public func distribute<Source, E>(
         sources: [Source],
         count: (Source) -> Int64,
         using random: inout PseudoRandom,
-        yield: (Target, Int32) -> ()
-    ) {
+        yield: (Target, Int32) throws(E) -> ()
+    ) throws(E) {
         let chunks: Int = self.chunks
         for source: Source in sources {
-            self.distribute(
+            try self.distribute(
                 count: count(source),
                 chunks: chunks,
                 using: &random,
@@ -158,12 +160,14 @@ extension DistributionBasis {
         }
     }
 
-    @inlinable public func distribute(
+    /// Distributes counts and passes them to the closure `yield`.
+    /// The closure will only be called for bins with count greater than zero.
+    @inlinable public func distribute<E>(
         count: Int64,
         using random: inout PseudoRandom,
-        yield: (Target, Int32) -> ()
-    ) {
-        self.distribute(
+        yield: (Target, Int32) throws(E) -> ()
+    ) throws(E) {
+        try self.distribute(
             count: count,
             chunks: self.chunks,
             using: &random,
@@ -173,12 +177,12 @@ extension DistributionBasis {
 }
 extension DistributionBasis {
     @inlinable var chunks: Int { self.weightCDF.count / 4 }
-    @inlinable func distribute(
+    @inlinable func distribute<E>(
         count: Int64,
         chunks: Int,
         using random: inout PseudoRandom,
-        yield: (Target, Int32) -> ()
-    ) {
+        yield: (Target, Int32) throws(E) -> ()
+    ) throws(E) {
         let N: SIMD4<Float> = .init(repeating: Float.init(count))
         let u: SIMD4<Float> = .init(
             repeating: Float.random(in: 0 ..< 1, using: &random.generator)
@@ -202,16 +206,16 @@ extension DistributionBasis {
             let k: SIMD4<Int32> = n &- m
 
             if  k.x > 0 {
-                yield(self.targets[i].target, k.x)
+                try yield(self.targets[i].target, k.x)
             }
             if  k.y > 0 {
-                yield(self.targets[i + 1].target, k.y)
+                try yield(self.targets[i + 1].target, k.y)
             }
             if  k.z > 0 {
-                yield(self.targets[i + 2].target, k.z)
+                try yield(self.targets[i + 2].target, k.z)
             }
             if  k.w > 0 {
-                yield(self.targets[i + 3].target, k.w)
+                try yield(self.targets[i + 3].target, k.w)
             }
         }
     }
