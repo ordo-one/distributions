@@ -17,9 +17,16 @@ import RealModule
     }
 }
 extension Binomial {
-    @inlinable public static subscript(n: Int64, p: Double) -> Self { .init(n: n, p: p) }
+    @inlinable public static subscript(n: Int64, p: Double) -> Self {
+        guard p.isFinite else {
+            fatalError("Binomial.subscript cannot be called with `p` = \(p)")
+        }
+        return .init(n: n, p: p)
+    }
 }
 extension Binomial {
+    /// Sample the binomial distribution. As long as ``n`` is non-negative, the result is
+    /// guaranteed to lie in the range `0 ... n`.
     @inlinable public func sample(using generator: inout some RandomNumberGenerator) -> Int64 {
         if self.p <= 0 { return 0 }
         if self.p >= 1 { return self.n }
