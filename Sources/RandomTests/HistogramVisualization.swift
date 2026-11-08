@@ -172,14 +172,16 @@ extension HistogramVisualization {
             expectedPercent: expectedPercent.percent().padding(left: self.columnWidths.percent)
         )
 
-        print("""
+        print(
+            """
              \(formatted.value) \
             | \(formatted.count) \
             | \(formatted.actualPercent) \
             | \(formatted.expectedPercent) \
             | \(actualBar.padding(left: self.columnWidths.bar)) \
             | \(expectedBar)
-            """)
+            """
+        )
     }
 
     private func bar(value: Double, maxValue: Double) -> String {
